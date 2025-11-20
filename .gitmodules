@@ -12,3 +12,8 @@
     path = wasi-sdk
     url = git@github.com:WebAssembly/wasi-sdk.git
     branch = wasi-sdk-29
+
+[submodule "numpy"]
+    path = numpy
+    url = git@github.com:numpy/numpy.git
+    branch = v2.2.5

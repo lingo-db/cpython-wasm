@@ -1,0 +1,23 @@
+set(PYWASM_SRC "${CMAKE_CURRENT_LIST_DIR}/../binary-spoofer.py")
+file(REAL_PATH "${PYWASM_SRC}" PYWASM_ABS)
+
+if(NOT EXISTS "${PYWASM_ABS}")
+  message(FATAL_ERROR "binary-spoofer.py not found at: ${PYWASM_ABS}")
+endif()
+
+message(STATUS "binary-spoofer absolute path: ${PYWASM_ABS}")
+
+set(SPOOFED_BINARIES gcc cc c++ ar cargo cmake gfortran ld lld meson ranlib strip)
+foreach(entry IN LISTS SPOOFED_BINARIES)
+  set(link_path "${CMAKE_CURRENT_LIST_DIR}/${entry}")
+  if(IS_DIRECTORY "${link_path}")
+    continue()
+  endif()
+  if(EXISTS "${link_path}")
+    file(REMOVE "${link_path}")
+    message(STATUS "Removed existing entry: ${link_path}")
+  endif()
+  file(CREATE_LINK "${PYWASM_ABS}" "${link_path}" SYMBOLIC)
+  message(STATUS "Created symlink: ${link_path} -> ${PYWASM_ABS}")
+  file(CHMOD "${PYWASM_ABS}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+endforeach()
