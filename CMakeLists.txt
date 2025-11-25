@@ -1,46 +1,18 @@
 cmake_minimum_required(VERSION 3.16)
 
-find_program(CARGO_EXECUTABLE cargo)
-if(NOT CARGO_EXECUTABLE)
-    message(FATAL_ERROR "cargo not found. Please install Rust and Cargo to proceed.")
-endif()
-
 # Use built/install wasi-sdk subdirectory
-set(WASI_SDK_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk/build/install")
+set(WASI_SDK_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk/")
 set(WASI_SYSROOT "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot")
 
-## Build WASI SDK toolchain
+## Add WASI SDK toolchain
 add_custom_command(
-    OUTPUT "${WASI_SDK_INSTALL_DIR}/bin/clang"
-    COMMAND cmake -G Ninja -B build/toolchain -S ${CMAKE_CURRENT_LIST_DIR}/wasi-sdk -DWASI_SDK_BUILD_TOOLCHAIN=ON -DCMAKE_INSTALL_PREFIX=build/install
-    COMMAND cmake --build build/toolchain --target install
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk"
-    COMMENT "Building WASI SDK toolchain"
+    OUTPUT "${WASI_SDK_INSTALL_DIR}/bin/clang" "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot" "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/wasm32-unknown-wasi/libclang_rt.builtins.a"
+    COMMAND bash -c 'wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/wasi-sdk-29.0-x86_64-linux.tar.gz'
+    COMMAND bash -c 'tar -xvf wasi-sdk-29.0-x86_64-linux.tar.gz --strip-components=1 -C "${WASI_SDK_INSTALL_DIR}/"'
+    COMMAND bash -c 'rm wasi-sdk-29.0-x86_64-linux.tar.gz'
+    COMMENT "Downloading WASI SDK toolchain"
 )
-add_custom_target(WasiSDKToolchain DEPENDS "${WASI_SDK_INSTALL_DIR}/bin/clang")
-
-## Build WASI SDK sysroot
-add_custom_command(
-    OUTPUT "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot"
-    COMMAND cmake -G Ninja -B build/sysroot -S ${CMAKE_CURRENT_LIST_DIR}/wasi-sdk -DCMAKE_INSTALL_PREFIX=build/install -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk/build/install/share/cmake/wasi-sdk.cmake -DCMAKE_C_COMPILER_WORKS=ON -DCMAKE_CXX_COMPILER_WORKS=ON
-    COMMAND cmake --build build/sysroot --target install
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk"
-    DEPENDS WasiSDKToolchain
-    COMMENT "Building WASI SDK sysroot"
-)
-# wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/libclang_rt-29.0.tar.gz
-# mkdir -p ${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/
-# tar -xvf libclang_rt-29.0.tar.gz --strip-components=1 -C ${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/
-add_custom_command(
-    OUTPUT "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/wasm32-unknown-wasi/libclang_rt.builtins.a"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/"
-    COMMAND bash -c 'wget https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/libclang_rt-29.0.tar.gz'
-    COMMAND bash -c 'tar -xvf libclang_rt-29.0.tar.gz --strip-components=1 -C "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/"'
-    COMMAND bash -c 'rm libclang_rt-29.0.tar.gz'
-    COMMENT "Copying libclang_rt.builtins-wasm32.a to WASI SDK"
-)
-
-add_custom_target(WasiSDKSysroot DEPENDS "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot" "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/wasm32-unknown-wasi/libclang_rt.builtins.a")
+add_custom_target(WasiSDKToolchain DEPENDS "${WASI_SDK_INSTALL_DIR}/bin/clang" "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot" "${WASI_SDK_INSTALL_DIR}/lib/clang/21/lib/wasm32-unknown-wasi/libclang_rt.builtins.a")
 
 ## Setup CPython WASM
 set(CPYTHON_WASM_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/cpython" CACHE PATH "Path to the Python source directory")
@@ -86,7 +58,7 @@ add_custom_command(
         WASI_SYSROOT=${WASI_SYSROOT}
         ${CPYTHON_WASM_SOURCE_DIR}/configure --host=wasm32-wasip1 --build=x86_64-pc-linux-gnu --with-build-python=${CPYTHON_NATIVE_BUILD_DIR}/python
     COMMAND make -j$$(nproc) all
-    DEPENDS CPythonNative WasiSDKToolchain WasiSDKSysroot
+    DEPENDS CPythonNative WasiSDKToolchain
     COMMENT "Building WASM CPython"
 )
 add_custom_target(CPythonWasm DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.wasm")
