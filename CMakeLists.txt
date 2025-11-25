@@ -169,6 +169,3 @@ target_compile_definitions(cpython-wasm INTERFACE
 )
 target_link_libraries(cpython-wasm INTERFACE vmlib)
 add_dependencies(cpython-wasm GeneratePythonAOT)
-
-add_subdirectory(numpy-support)
-add_dependencies(cpython-wasm create_numpy_build_symlinks)
