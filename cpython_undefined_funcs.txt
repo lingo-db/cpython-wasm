@@ -1,0 +1,2 @@
+__wrap_dlopen
+__wrap_dlsym

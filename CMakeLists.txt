@@ -41,7 +41,7 @@ add_custom_command(
     WORKING_DIRECTORY ${CPYTHON_WASM_BUILD_DIR}
     COMMAND ${CMAKE_COMMAND} -E env
         CFLAGS='--sysroot=${WASI_SYSROOT}'
-        LDFLAGS='--sysroot=${WASI_SYSROOT} -Wl,--export-all'
+        LDFLAGS='--sysroot=${WASI_SYSROOT} -Wl,--wrap=dlopen -Wl,--wrap=dlsym -Wl,--allow-undefined-file=${CMAKE_CURRENT_LIST_DIR}/cpython_undefined_funcs.txt -Wl,--export-all'
         AR=${WASI_SDK_INSTALL_DIR}/bin/llvm-ar
         CC='${WASI_SDK_INSTALL_DIR}/bin/clang'
         CONFIG_SITE=${CPYTHON_WASM_SOURCE_DIR}/Tools/wasm/wasi/config.site-wasm32-wasi
