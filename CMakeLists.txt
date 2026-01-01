@@ -10,6 +10,9 @@ set(WASI_SDK_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/wasi-sdk/build/install")
 set(WASI_SYSROOT "${WASI_SDK_INSTALL_DIR}/share/wasi-sysroot")
 
 ## Build WASI SDK toolchain
+# we currently need to build our own wasi-sdk since we need the newest LLVM version with a patched wasm-ld, since the
+# current latest release has a bug that makes it incompatible with the --wrap linker flag used when building CPython
+# see: https://github.com/llvm/llvm-project/pull/169656
 add_custom_command(
     OUTPUT "${WASI_SDK_INSTALL_DIR}/bin/clang"
     COMMAND cmake -G Ninja -B build/toolchain -S ${CMAKE_CURRENT_LIST_DIR}/wasi-sdk -DWASI_SDK_BUILD_TOOLCHAIN=ON -DCMAKE_INSTALL_PREFIX=build/install
@@ -69,7 +72,7 @@ add_custom_command(
     WORKING_DIRECTORY ${CPYTHON_WASM_BUILD_DIR}
     COMMAND ${CMAKE_COMMAND} -E env
         CFLAGS='--sysroot=${WASI_SYSROOT}'
-        LDFLAGS='--sysroot=${WASI_SYSROOT} -Wl,--wrap=dlopen -Wl,--wrap=dlsym -Wl,--allow-undefined-file=${CMAKE_CURRENT_LIST_DIR}/cpython_undefined_funcs.txt -Wl,--export-all'
+        LDFLAGS='--sysroot=${WASI_SYSROOT} -Wl,--export-all'
         AR=${WASI_SDK_INSTALL_DIR}/bin/llvm-ar
         CC='${WASI_SDK_INSTALL_DIR}/bin/clang'
         CONFIG_SITE=${CPYTHON_WASM_SOURCE_DIR}/Tools/wasm/wasi/config.site-wasm32-wasi
@@ -100,7 +103,7 @@ else ()
     set (WAMR_BUILD_PLATFORM "linux")
     set (WAMR_BUILD_TARGET "X86_64")
 endif ()
-set (WAMR_BUILD_INTERP 0)
+set (WAMR_BUILD_INTERP 1)
 set (WAMR_BUILD_FAST_INTERP 0)
 set (WAMR_BUILD_AOT 1)
 set (WAMR_BUILD_LIBC_BUILTIN 1)
@@ -108,6 +111,8 @@ set (WAMR_BUILD_LIBC_WASI 1)
 set (WAMR_BUILD_SIMD 1)
 set (WAMR_BUILD_REF_TYPES 1)
 set (WAMR_BUILD_WITH_CUSTOM_LLVM 1)
+set (WAMR_BUILD_DUMP_CALL_STACK 1)
+set (WAMR_BUILD_CUSTOM_NAME_SECTION 1)
 set (WAMR_ROOT_DIR ${CMAKE_CURRENT_LIST_DIR}/wasm-micro-runtime)
 include (${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
 add_library(vmlib ${WAMR_RUNTIME_LIB_SOURCE} ${UNCOMMON_SHARED_SOURCE})
@@ -135,22 +140,24 @@ add_custom_command(
                     -D WAMR_BUILD_WITH_CUSTOM_LLVM=${WAMR_BUILD_WITH_CUSTOM_LLVM}
                     -D WAMR_BUILD_PLATFORM=${WAMR_BUILD_PLATFORM}
                     -D WAMR_BUILD_TARGET=${WAMR_BUILD_TARGET}
+                    -D WAMR_BUILD_DUMP_CALL_STACK=${WAMR_BUILD_DUMP_CALL_STACK}
+                    -D WAMR_BUILD_CUSTOM_NAME_SECTION=${WAMR_BUILD_CUSTOM_NAME_SECTION}
                     -D CMAKE_BUILD_TYPE=Release
         COMMAND make -C "${WAMR_COMPILER_BUILD_DIR}" -j4
         COMMENT "Building wamr-compiler using cmake and make"
 )
-# Add custom command to generate python.aot from python.wasm
-add_custom_command(
-        OUTPUT "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-        COMMAND ${WAMR_COMPILER_EXECUTABLE} -o "${CPYTHON_WASM_BUILD_DIR}/python.aot" "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
-        DEPENDS CPythonWasm "${WAMR_COMPILER_EXECUTABLE}"
-        COMMENT "Generating python.aot from python.wasm using wamrc"
-)
-# Add output as dependency for library
-add_custom_target(
-        GeneratePythonAOT ALL
-        DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-)
+## Add custom command to generate python.aot from python.wasm
+#add_custom_command(
+#        OUTPUT "${CPYTHON_WASM_BUILD_DIR}/python.aot"
+#        COMMAND ${WAMR_COMPILER_EXECUTABLE} --enable-dump-call-stack --size-level=0 -o "${CPYTHON_WASM_BUILD_DIR}/python.aot" "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
+#        DEPENDS CPythonWasm "${WAMR_COMPILER_EXECUTABLE}"
+#        COMMENT "Generating python.aot from python.wasm using wamrc"
+#)
+## Add output as dependency for library
+#add_custom_target(
+#        GeneratePythonAOT ALL
+#        DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.aot"
+#)
 
 add_library(cpython-wasm INTERFACE ${UNCOMMON_SHARED_SOURCE})
 set(UNCOMMON_SHARED_SOURCE ${UNCOMMON_SHARED_SOURCE} PARENT_SCOPE)
@@ -165,7 +172,7 @@ target_include_directories(cpython-wasm INTERFACE
 target_compile_definitions(cpython-wasm INTERFACE
     CPYTHON_WASM_SOURCE_DIR="${CPYTHON_WASM_SOURCE_DIR}"
     CPYTHON_WASM_BUILD_DIR="${CPYTHON_WASM_BUILD_DIR}"
-    CPYTHON_WASM_AOT_FILE="${CPYTHON_WASM_BUILD_DIR}/python.aot"
+    CPYTHON_WASM_AOT_FILE="${CPYTHON_WASM_BUILD_DIR}/cpython-merged.aot"
 )
 target_link_libraries(cpython-wasm INTERFACE vmlib)
-add_dependencies(cpython-wasm GeneratePythonAOT)
+#add_dependencies(cpython-wasm GeneratePythonAOT)
