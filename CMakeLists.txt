@@ -111,10 +111,21 @@ add_custom_command(
         COMMAND make -C "${WAMR_COMPILER_BUILD_DIR}" -j4
         COMMENT "Building wamr-compiler using cmake and make"
 )
-# Add custom command to generate python.aot from python.wasm
+# Add custom command to generate python.aot from python.wasm.
+# Pin the AOT target to x86_64/skylake + SIMD instead of letting wamrc
+# autodetect from the build host. Without this, GitHub-runner Zen4 builds
+# emit AVX-512 instructions that SIGILL when the binary subsequently runs
+# on a Zen3 runner (and vice-versa for any other feature mismatch).
+# Skylake is the safe lowest-common-denominator that still keeps SSE4.2 +
+# AVX2; --enable-simd preserves WASM-SIMD support on top.
 add_custom_command(
         OUTPUT "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-        COMMAND ${WAMR_COMPILER_EXECUTABLE} -o "${CPYTHON_WASM_BUILD_DIR}/python.aot" "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
+        COMMAND ${WAMR_COMPILER_EXECUTABLE}
+                    --target=x86_64
+                    --cpu=skylake
+                    --enable-simd
+                    -o "${CPYTHON_WASM_BUILD_DIR}/python.aot"
+                    "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
         DEPENDS CPythonWasm "${WAMR_COMPILER_EXECUTABLE}"
         COMMENT "Generating python.aot from python.wasm using wamrc"
 )
