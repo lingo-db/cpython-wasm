@@ -63,92 +63,49 @@ add_custom_command(
 )
 add_custom_target(CPythonWasm DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.wasm")
 
-## Setup WAMR
-# https://github.com/bytecodealliance/wasm-micro-runtime/blob/main/doc/build_wamr.md#wamr-vmcore-cmake-building-configurations
+## Wasmer C API SDK
+# Bundled at configure time so the build is hermetic — we get a known runtime
+# version + matching CLI for AOT precompilation. Pin v7.1.0 explicitly.
+set(WASMER_VERSION "7.1.0")
+set(WASMER_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/wasmer-sdk")
 if (APPLE)
-    set (WAMR_BUILD_PLATFORM "darwin")
-    set (WAMR_BUILD_TARGET "AARCH64")
+    set(WASMER_PLATFORM "darwin-arm64")
 else ()
-    set (WAMR_BUILD_PLATFORM "linux")
-    set (WAMR_BUILD_TARGET "X86_64")
+    set(WASMER_PLATFORM "linux-amd64")
 endif ()
-set (WAMR_BUILD_INTERP 0)
-set (WAMR_BUILD_FAST_INTERP 0)
-set (WAMR_BUILD_AOT 1)
-set (WAMR_BUILD_LIBC_BUILTIN 1)
-set (WAMR_BUILD_LIBC_WASI 1)
-set (WAMR_BUILD_SIMD 1)
-set (WAMR_BUILD_REF_TYPES 1)
-set (WAMR_BUILD_WITH_CUSTOM_LLVM 1)
-set (WAMR_ROOT_DIR ${CMAKE_CURRENT_LIST_DIR}/wasm-micro-runtime)
-include (${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
-add_library(vmlib ${WAMR_RUNTIME_LIB_SOURCE} ${UNCOMMON_SHARED_SOURCE})
-include (${SHARED_DIR}/utils/uncommon/shared_uncommon.cmake)
+set(WASMER_TARBALL "wasmer-${WASMER_PLATFORM}.tar.gz")
+set(WASMER_DOWNLOAD_URL "https://github.com/wasmerio/wasmer/releases/download/v${WASMER_VERSION}/${WASMER_TARBALL}")
 
-## Compile python.wasm to python.aot using wamrc
-# Define the build directory for wamr-compiler
-set(WAMR_COMPILER_DIR "${WAMR_ROOT_DIR}/wamr-compiler")
-set(WAMR_COMPILER_BUILD_DIR "${CMAKE_BINARY_DIR}/wamr-compiler")
-set(WAMR_COMPILER_EXECUTABLE "${WAMR_COMPILER_BUILD_DIR}/wamrc")
-
-# Add custom command to build wamr-compiler
 add_custom_command(
-        OUTPUT "${WAMR_COMPILER_EXECUTABLE}"
-        COMMAND ${CMAKE_COMMAND}
-                    -S "${WAMR_COMPILER_DIR}"
-                    -B "${WAMR_COMPILER_BUILD_DIR}"
-                    -D WAMR_BUILD_INTERP=${WAMR_BUILD_INTERP}
-                    -D WAMR_BUILD_FAST_INTERP=${WAMR_BUILD_FAST_INTERP}
-                    -D WAMR_BUILD_AOT=${WAMR_BUILD_AOT}
-                    -D WAMR_BUILD_LIBC_BUILTIN=${WAMR_BUILD_LIBC_BUILTIN}
-                    -D WAMR_BUILD_LIBC_WASI=${WAMR_BUILD_LIBC_WASI}
-                    -D WAMR_BUILD_SIMD=${WAMR_BUILD_SIMD}
-                    -D WAMR_BUILD_REF_TYPES=${WAMR_BUILD_REF_TYPES}
-                    -D WAMR_BUILD_WITH_CUSTOM_LLVM=${WAMR_BUILD_WITH_CUSTOM_LLVM}
-                    -D WAMR_BUILD_PLATFORM=${WAMR_BUILD_PLATFORM}
-                    -D WAMR_BUILD_TARGET=${WAMR_BUILD_TARGET}
-                    -D CMAKE_BUILD_TYPE=Release
-        COMMAND make -C "${WAMR_COMPILER_BUILD_DIR}" -j4
-        COMMENT "Building wamr-compiler using cmake and make"
+    OUTPUT "${WASMER_INSTALL_DIR}/lib/libwasmer.so" "${WASMER_INSTALL_DIR}/include/wasmer.h" "${WASMER_INSTALL_DIR}/bin/wasmer"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WASMER_INSTALL_DIR}"
+    COMMAND bash -c "wget -q '${WASMER_DOWNLOAD_URL}' -O '${WASMER_INSTALL_DIR}/${WASMER_TARBALL}'"
+    COMMAND bash -c "tar -xzf '${WASMER_INSTALL_DIR}/${WASMER_TARBALL}' -C '${WASMER_INSTALL_DIR}'"
+    COMMAND bash -c "rm '${WASMER_INSTALL_DIR}/${WASMER_TARBALL}'"
+    COMMENT "Downloading Wasmer C API SDK v${WASMER_VERSION} (${WASMER_PLATFORM})"
 )
-# Add custom command to generate python.aot from python.wasm.
-# Pin the AOT target to x86_64/skylake + SIMD instead of letting wamrc
-# autodetect from the build host. Without this, GitHub-runner Zen4 builds
-# emit AVX-512 instructions that SIGILL when the binary subsequently runs
-# on a Zen3 runner (and vice-versa for any other feature mismatch).
-# Skylake is the safe lowest-common-denominator that still keeps SSE4.2 +
-# AVX2; --enable-simd preserves WASM-SIMD support on top.
+add_custom_target(WasmerSDK DEPENDS "${WASMER_INSTALL_DIR}/lib/libwasmer.so" "${WASMER_INSTALL_DIR}/include/wasmer.h" "${WASMER_INSTALL_DIR}/bin/wasmer")
+
+## Pre-compile python.wasm to a Wasmer-serialized artifact (replaces wamrc -> .aot).
+# Trusts wasmer's default target/CPU detection — unlike wamrc which we had to
+# manually pin to skylake to avoid AVX-512 SIGILL on Zen-mismatched runners.
 add_custom_command(
-        OUTPUT "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-        COMMAND ${WAMR_COMPILER_EXECUTABLE}
-                    --target=x86_64
-                    --cpu=skylake
-                    --enable-simd
-                    -o "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-                    "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
-        DEPENDS CPythonWasm "${WAMR_COMPILER_EXECUTABLE}"
-        COMMENT "Generating python.aot from python.wasm using wamrc"
+    OUTPUT "${CPYTHON_WASM_BUILD_DIR}/python.wasmu"
+    COMMAND "${WASMER_INSTALL_DIR}/bin/wasmer" compile
+                -o "${CPYTHON_WASM_BUILD_DIR}/python.wasmu"
+                "${CPYTHON_WASM_BUILD_DIR}/python.wasm"
+    DEPENDS CPythonWasm WasmerSDK
+    COMMENT "Pre-compiling python.wasm -> python.wasmu via wasmer"
 )
-# Add output as dependency for library
-add_custom_target(
-        GeneratePythonAOT ALL
-        DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.aot"
-)
+add_custom_target(GeneratePythonWasmu ALL DEPENDS "${CPYTHON_WASM_BUILD_DIR}/python.wasmu")
 
-add_library(cpython-wasm INTERFACE ${UNCOMMON_SHARED_SOURCE})
-set(UNCOMMON_SHARED_SOURCE ${UNCOMMON_SHARED_SOURCE} PARENT_SCOPE)
-
-target_include_directories(cpython-wasm INTERFACE
-    ${UNCOMMON_SHARED_DIR}
-    ${SHARED_DIR}/utils/
-    ${SHARED_DIR}/platform/linux/
-    ${IWASM_DIR}/include/
-    ${IWASM_DIR}/common/
-)
+# INTERFACE target consumed by src/runtime — exposes the SDK + the artifact path.
+add_library(cpython-wasm INTERFACE)
+target_include_directories(cpython-wasm INTERFACE "${WASMER_INSTALL_DIR}/include")
+target_link_libraries(cpython-wasm INTERFACE "${WASMER_INSTALL_DIR}/lib/libwasmer.so")
 target_compile_definitions(cpython-wasm INTERFACE
     CPYTHON_WASM_SOURCE_DIR="${CPYTHON_WASM_SOURCE_DIR}"
     CPYTHON_WASM_BUILD_DIR="${CPYTHON_WASM_BUILD_DIR}"
-    CPYTHON_WASM_AOT_FILE="${CPYTHON_WASM_BUILD_DIR}/python.aot"
+    CPYTHON_WASM_FILE="${CPYTHON_WASM_BUILD_DIR}/python.wasmu"
 )
-target_link_libraries(cpython-wasm INTERFACE vmlib)
-add_dependencies(cpython-wasm GeneratePythonAOT)
+add_dependencies(cpython-wasm GeneratePythonWasmu)

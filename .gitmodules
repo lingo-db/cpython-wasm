@@ -3,11 +3,6 @@
     url = git@github.com:python/cpython.git
     branch = v3.14.0
 
-[submodule "wasm-micro-runtime"]
-    path = wasm-micro-runtime
-    url = git@github.com:bytecodealliance/wasm-micro-runtime.git
-    branch = WAMR-2.4.3
-
 [submodule "wasi-sdk"]
     path = wasi-sdk
     url = git@github.com:WebAssembly/wasi-sdk.git
