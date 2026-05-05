@@ -1,0 +1,26 @@
+[package]
+name = "wasix-python-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# rlib so the in-crate `smoke` binary can use the public Rust API; cdylib
+# for runtime linking from C++; staticlib for direct static link into the
+# lingodb binary.
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmer = { version = "=7.1.0" }
+wasmer-wasix = "=0.701.0"
+webc = "=11.0.0"
+
+[profile.release]
+# We embed the bridge into a release binary; keep debug info for profiling
+# but disable LTO since the host binary already enables LTO across its own
+# objects.
+debug = 1
+lto = false
