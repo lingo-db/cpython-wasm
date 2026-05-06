@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use wasmer::{Engine, Function, Instance, Memory, Module, Store, Value};
+use wasmer::sys::{LLVM, LLVMOptLevel};
+use wasmer::{Engine, Function, Instance, Memory, Module, Store, Type, TypedFunction, Value};
 use wasmer_wasix::bin_factory::BinaryPackage;
 use wasmer_wasix::runners::wasi::{PackageOrHash, RuntimeOrEngine, WasiRunner};
 use wasmer_wasix::runners::MappedDirectory;
@@ -107,6 +108,67 @@ fn wasmer_to_wasm_val(v: &Value) -> WasmVal {
     }
 }
 
+// ─── Typed-call dispatch ──────────────────────────────────────────────────
+//
+// `Function::call(&[Value])` (the dynamic path) allocates a `Box<[Value]>`
+// per call and goes through a generic trampoline that re-validates argument
+// types on every invocation. For a UDF-heavy workload that fires
+// `PyObject_Vectorcall` (i32×4 → i32) once per row plus several boxing
+// helpers, that's the dominant per-row cost.
+//
+// We classify each looked-up export by its `FunctionType` and store the
+// matching monomorphized `TypedFunction<Args,Rets>`. At call time we read
+// the host-side `WasmVal[]` directly into the typed call — no `Vec<Value>`,
+// no signature validation, just the wasmer fast path. Unknown signatures
+// fall back to the dynamic `Function::call` path.
+
+#[allow(non_camel_case_types)]
+enum TypedHandle {
+    V_V(TypedFunction<(), ()>),
+    V_I32(TypedFunction<(), i32>),
+    I32_V(TypedFunction<i32, ()>),
+    I32_I32(TypedFunction<i32, i32>),
+    I32_I64(TypedFunction<i32, i64>),
+    I64_I32(TypedFunction<i64, i32>),
+    I32_F64(TypedFunction<i32, f64>),
+    F64_I32(TypedFunction<f64, i32>),
+    I32I32_I32(TypedFunction<(i32, i32), i32>),
+    I32I32I32_I32(TypedFunction<(i32, i32, i32), i32>),
+    I32I32I32I32_I32(TypedFunction<(i32, i32, i32, i32), i32>),
+    Generic(Function),
+}
+
+fn classify(func: &Function, store: &Store) -> TypedHandle {
+    let ty = func.ty(store);
+    let p = ty.params();
+    let r = ty.results();
+    let pat = (p, r);
+    macro_rules! tryt {
+        ($variant:ident, $A:ty, $R:ty) => {
+            match func.typed::<$A, $R>(store) {
+                Ok(tf) => return TypedHandle::$variant(tf),
+                Err(_) => {}
+            }
+        };
+    }
+    use Type::*;
+    match pat {
+        (&[], &[]) => tryt!(V_V, (), ()),
+        (&[], &[I32]) => tryt!(V_I32, (), i32),
+        (&[I32], &[]) => tryt!(I32_V, i32, ()),
+        (&[I32], &[I32]) => tryt!(I32_I32, i32, i32),
+        (&[I32], &[I64]) => tryt!(I32_I64, i32, i64),
+        (&[I64], &[I32]) => tryt!(I64_I32, i64, i32),
+        (&[I32], &[F64]) => tryt!(I32_F64, i32, f64),
+        (&[F64], &[I32]) => tryt!(F64_I32, f64, i32),
+        (&[I32, I32], &[I32]) => tryt!(I32I32_I32, (i32, i32), i32),
+        (&[I32, I32, I32], &[I32]) => tryt!(I32I32I32_I32, (i32, i32, i32), i32),
+        (&[I32, I32, I32, I32], &[I32]) => tryt!(I32I32I32I32_I32, (i32, i32, i32, i32), i32),
+        _ => {}
+    }
+    TypedHandle::Generic(func.clone())
+}
+
 // ─── Session ───────────────────────────────────────────────────────────────
 pub struct Session {
     // Drop order matters: anything holding tokio handles must drop before
@@ -114,7 +176,7 @@ pub struct Session {
     store: Store,
     instance: Instance,
     memory: Memory,
-    funcs: Vec<Function>,
+    funcs: Vec<TypedHandle>,
     func_names: Vec<String>,
     _runtime: Arc<dyn Runtime + Send + Sync>,
     _pkg: BinaryPackage,
@@ -131,7 +193,15 @@ fn build_session(
         .build()
         .context("build tokio runtime")?;
 
-    let engine = Engine::default();
+    // LLVM @ aggressive — matches the rust-wasix-python3 prototype's
+    // `--compiler llvm` path. Cranelift (Engine::default()) compiles ~3-5×
+    // faster but generates noticeably slower code; cached compile output in
+    // `cache_dir` makes subsequent session_new fast either way.
+    let engine = {
+        let mut llvm = LLVM::new();
+        llvm.opt_level(LLVMOptLevel::Aggressive);
+        Engine::from(llvm)
+    };
     tracing::info!("engine deterministic_id='{}'", engine.deterministic_id());
 
     // Read+parse webc.
@@ -323,9 +393,46 @@ pub unsafe extern "C" fn lingodb_wasix_lookup_func(
         Ok(f) => f.clone(),
         Err(_) => return -1,
     };
-    sess.funcs.push(f);
+    let handle = classify(&f, &sess.store);
+    sess.funcs.push(handle);
     sess.func_names.push(n.to_string());
     (sess.funcs.len() - 1) as i32
+}
+
+// Helpers that read packed WasmVal[] without bounds checks (the C++ side
+// guarantees arity matches the looked-up function).
+#[inline(always)]
+unsafe fn arg_i32(args: *const WasmVal, i: usize) -> i32 {
+    unsafe { (*args.add(i)).of.i32 }
+}
+#[inline(always)]
+unsafe fn arg_i64(args: *const WasmVal, i: usize) -> i64 {
+    unsafe { (*args.add(i)).of.i64 }
+}
+#[inline(always)]
+unsafe fn arg_f64(args: *const WasmVal, i: usize) -> f64 {
+    unsafe { (*args.add(i)).of.f64 }
+}
+#[inline(always)]
+unsafe fn write_i32(results: *mut WasmVal, v: i32) {
+    unsafe {
+        (*results).kind = WASM_I32;
+        (*results).of = WasmValOf { i32: v };
+    }
+}
+#[inline(always)]
+unsafe fn write_i64(results: *mut WasmVal, v: i64) {
+    unsafe {
+        (*results).kind = WASM_I64;
+        (*results).of = WasmValOf { i64: v };
+    }
+}
+#[inline(always)]
+unsafe fn write_f64(results: *mut WasmVal, v: f64) {
+    unsafe {
+        (*results).kind = WASM_F64;
+        (*results).of = WasmValOf { f64: v };
+    }
 }
 
 /// 0 on success, -1 on trap/error.
@@ -342,40 +449,107 @@ pub unsafe extern "C" fn lingodb_wasix_call(
     nresults: usize,
 ) -> i32 {
     let sess = unsafe { &mut *sess };
-    let func = match sess.funcs.get(func_idx as usize) {
-        Some(f) => f.clone(),
+    let handle = match sess.funcs.get(func_idx as usize) {
+        Some(h) => h,
         None => {
             set_last_error(format!("invalid func_idx {func_idx}"));
             return -1;
         }
     };
-    let arg_slice: &[WasmVal] = if nargs == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(args, nargs) }
+    // Clone the handle so we can release the borrow on `sess.funcs` before
+    // taking `&mut sess.store`. TypedFunction is cheap to clone (Arc-ish).
+    let handle = match handle {
+        TypedHandle::V_V(f) => TypedHandle::V_V(f.clone()),
+        TypedHandle::V_I32(f) => TypedHandle::V_I32(f.clone()),
+        TypedHandle::I32_V(f) => TypedHandle::I32_V(f.clone()),
+        TypedHandle::I32_I32(f) => TypedHandle::I32_I32(f.clone()),
+        TypedHandle::I32_I64(f) => TypedHandle::I32_I64(f.clone()),
+        TypedHandle::I64_I32(f) => TypedHandle::I64_I32(f.clone()),
+        TypedHandle::I32_F64(f) => TypedHandle::I32_F64(f.clone()),
+        TypedHandle::F64_I32(f) => TypedHandle::F64_I32(f.clone()),
+        TypedHandle::I32I32_I32(f) => TypedHandle::I32I32_I32(f.clone()),
+        TypedHandle::I32I32I32_I32(f) => TypedHandle::I32I32I32_I32(f.clone()),
+        TypedHandle::I32I32I32I32_I32(f) => TypedHandle::I32I32I32I32_I32(f.clone()),
+        TypedHandle::Generic(f) => TypedHandle::Generic(f.clone()),
     };
-    let arg_values: Vec<Value> = arg_slice
-        .iter()
-        .map(|v| unsafe { wasm_val_to_wasmer(v) })
-        .collect();
-    match func.call(&mut sess.store, &arg_values) {
-        Ok(out) => {
-            if out.len() != nresults {
-                set_last_error(format!(
-                    "result arity mismatch: wasm returned {}, caller asked for {}",
-                    out.len(),
-                    nresults
-                ));
-                return -1;
-            }
-            if nresults > 0 {
-                let res_slice = unsafe { std::slice::from_raw_parts_mut(results, nresults) };
-                for (dst, src) in res_slice.iter_mut().zip(out.iter()) {
-                    *dst = wasmer_to_wasm_val(src);
+    let store = &mut sess.store;
+    let res: Result<(), wasmer::RuntimeError> = unsafe {
+        match &handle {
+            TypedHandle::V_V(f) => f.call(store).map(|_| ()),
+            TypedHandle::V_I32(f) => f.call(store).map(|v| write_i32(results, v)),
+            TypedHandle::I32_V(f) => f.call(store, arg_i32(args, 0)).map(|_| ()),
+            TypedHandle::I32_I32(f) => f
+                .call(store, arg_i32(args, 0))
+                .map(|v| write_i32(results, v)),
+            TypedHandle::I32_I64(f) => f
+                .call(store, arg_i32(args, 0))
+                .map(|v| write_i64(results, v)),
+            TypedHandle::I64_I32(f) => f
+                .call(store, arg_i64(args, 0))
+                .map(|v| write_i32(results, v)),
+            TypedHandle::I32_F64(f) => f
+                .call(store, arg_i32(args, 0))
+                .map(|v| write_f64(results, v)),
+            TypedHandle::F64_I32(f) => f
+                .call(store, arg_f64(args, 0))
+                .map(|v| write_i32(results, v)),
+            TypedHandle::I32I32_I32(f) => f
+                .call(store, arg_i32(args, 0), arg_i32(args, 1))
+                .map(|v| write_i32(results, v)),
+            TypedHandle::I32I32I32_I32(f) => f
+                .call(
+                    store,
+                    arg_i32(args, 0),
+                    arg_i32(args, 1),
+                    arg_i32(args, 2),
+                )
+                .map(|v| write_i32(results, v)),
+            TypedHandle::I32I32I32I32_I32(f) => f
+                .call(
+                    store,
+                    arg_i32(args, 0),
+                    arg_i32(args, 1),
+                    arg_i32(args, 2),
+                    arg_i32(args, 3),
+                )
+                .map(|v| write_i32(results, v)),
+            TypedHandle::Generic(f) => {
+                // Unknown signature — fall back to the dynamic path. Rare;
+                // hit only for exports we didn't enumerate in `classify`.
+                let arg_slice: &[WasmVal] = if nargs == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(args, nargs)
+                };
+                let arg_values: Vec<Value> =
+                    arg_slice.iter().map(|v| wasm_val_to_wasmer(v)).collect();
+                match f.call(store, &arg_values) {
+                    Ok(out) => {
+                        if out.len() != nresults {
+                            set_last_error(format!(
+                                "result arity mismatch: wasm returned {}, caller asked for {}",
+                                out.len(),
+                                nresults
+                            ));
+                            return -1;
+                        }
+                        if nresults > 0 {
+                            let res_slice = std::slice::from_raw_parts_mut(results, nresults);
+                            for (dst, src) in res_slice.iter_mut().zip(out.iter()) {
+                                *dst = wasmer_to_wasm_val(src);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
                 }
             }
-            0
         }
+    };
+    let _ = nresults; // typed paths know their arity statically; nresults
+                     // is only consulted in the Generic fallback above.
+    match res {
+        Ok(()) => 0,
         Err(e) => {
             set_last_error(format!("trap: {e}"));
             -1

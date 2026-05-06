@@ -14,9 +14,19 @@ anyhow = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wasmer = { version = "=7.1.0" }
+wasmer = { version = "=7.1.0", features = ["llvm"] }
 wasmer-wasix = "=0.701.0"
 webc = "=11.0.0"
+
+# Local fork of wasmer-vm 7.1.0 — the only change is a one-slot thread-local
+# cache in front of the process-global STACK_POOL in
+# `src/trap/traphandlers.rs::on_wasm_stack`. The upstream global SegQueue is
+# the dominant scaling bottleneck above ~4 worker threads (every host->guest
+# call pops + pushes a DefaultStack). The TLS cache makes per-thread reuse
+# zero-contention for the LingoDB worker pattern (one in-flight call per
+# worker). See the inline comment in the patched file for details.
+[patch.crates-io]
+wasmer-vm = { path = "../wasmer-vm-patched" }
 
 [profile.release]
 # We embed the bridge into a release binary; keep debug info for profiling
