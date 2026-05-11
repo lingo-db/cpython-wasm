@@ -31,6 +31,15 @@ set(NUMPY_WHEEL_URL
     "https://pythonindex.wasix.org/packages/numpy-2.3.2-cp313-cp313-wasix_wasm32.whl")
 set(NUMPY_WHEEL_FILENAME "numpy-2.3.2-cp313-cp313-wasix_wasm32.whl")
 
+# pyarrow wasix wheel — needed by tabular Python UDFs, which bridge the
+# host arrow::Table over to a pyarrow.Table inside the sandbox via Arrow
+# IPC bytes (the standard C Data Interface route fails here: wasm32 vs
+# host pointer-width mismatch + the C-Data release callbacks are wasm
+# indirect-function-table indices that the host cannot call back).
+set(PYARROW_WHEEL_URL
+    "https://pythonindex.wasix.org/packages/pyarrow-21.0.0-cp313-cp313-wasix_wasm32.whl")
+set(PYARROW_WHEEL_FILENAME "pyarrow-21.0.0-cp313-cp313-wasix_wasm32.whl")
+
 message(STATUS "[wasix] Rust shim source : ${LINGODB_WASIX_BRIDGE_DIR}")
 message(STATUS "[wasix] webc download    : ${LINGODB_WASIX_WEBC_FILE}")
 message(STATUS "[wasix] site-packages    : ${LINGODB_WASIX_SITE_PACKAGES_DIR}")
@@ -47,22 +56,27 @@ add_custom_command(
 )
 add_custom_target(LingodbWasixWebc DEPENDS "${LINGODB_WASIX_WEBC_FILE}")
 
-# ── Download + unpack the numpy wheel (and any others later) ──────────────
+# ── Download + unpack wheels ──────────────────────────────────────────────
 # Wheels are zip files whose top-level layout *is* a site-packages tree, so
 # multiple wheels can be unpacked into the same dir.
-add_custom_command(
-    OUTPUT "${LINGODB_WASIX_SITE_PACKAGES_DIR}/.lingodb-numpy-installed"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${LINGODB_WASIX_SITE_PACKAGES_DIR}"
-    COMMAND wget -q "${NUMPY_WHEEL_URL}" -O "${LINGODB_WASIX_BUILD_DIR}/${NUMPY_WHEEL_FILENAME}"
-    COMMAND ${CMAKE_COMMAND} -E chdir "${LINGODB_WASIX_SITE_PACKAGES_DIR}"
-        unzip -oq "${LINGODB_WASIX_BUILD_DIR}/${NUMPY_WHEEL_FILENAME}"
-    COMMAND ${CMAKE_COMMAND} -E rm "${LINGODB_WASIX_BUILD_DIR}/${NUMPY_WHEEL_FILENAME}"
-    COMMAND ${CMAKE_COMMAND} -E touch
-        "${LINGODB_WASIX_SITE_PACKAGES_DIR}/.lingodb-numpy-installed"
-    COMMENT "Fetching + unpacking numpy WASIX wheel"
-)
-add_custom_target(LingodbWasixWheels ALL
-    DEPENDS "${LINGODB_WASIX_SITE_PACKAGES_DIR}/.lingodb-numpy-installed")
+function(install_wasix_wheel name url filename)
+    set(stamp "${LINGODB_WASIX_SITE_PACKAGES_DIR}/.lingodb-${name}-installed")
+    add_custom_command(
+        OUTPUT "${stamp}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${LINGODB_WASIX_SITE_PACKAGES_DIR}"
+        COMMAND wget -q "${url}" -O "${LINGODB_WASIX_BUILD_DIR}/${filename}"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${LINGODB_WASIX_SITE_PACKAGES_DIR}"
+            unzip -oq "${LINGODB_WASIX_BUILD_DIR}/${filename}"
+        COMMAND ${CMAKE_COMMAND} -E rm "${LINGODB_WASIX_BUILD_DIR}/${filename}"
+        COMMAND ${CMAKE_COMMAND} -E touch "${stamp}"
+        COMMENT "Fetching + unpacking ${name} WASIX wheel"
+    )
+    set(LINGODB_WASIX_WHEEL_STAMPS "${LINGODB_WASIX_WHEEL_STAMPS};${stamp}"
+        PARENT_SCOPE)
+endfunction()
+install_wasix_wheel(numpy   "${NUMPY_WHEEL_URL}"   "${NUMPY_WHEEL_FILENAME}")
+install_wasix_wheel(pyarrow "${PYARROW_WHEEL_URL}" "${PYARROW_WHEEL_FILENAME}")
+add_custom_target(LingodbWasixWheels ALL DEPENDS ${LINGODB_WASIX_WHEEL_STAMPS})
 
 # ── Build the Rust shim ──────────────────────────────────────────────────
 # Cargo manages its own incremental builds; we just declare the artifact and
